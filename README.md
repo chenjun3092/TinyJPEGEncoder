@@ -14,3 +14,8 @@ Features:
 - Public domain
 
 
+---
+1. 加入了自己的一些注释
+2. 加入cmake编译
+3. 添加测试文件夹img
+4. 添加JFIF的参考资料[Matlab JPEG详细介绍](http://blog.csdn.net/lg1259156776/article/details/50755525)，比较详细准确地说明整个编码也即代码实现过程

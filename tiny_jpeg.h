@@ -316,12 +316,7 @@ static const uint8_t tjei_default_ht_luma_dc_len[16] =
 		0,1,5,1,1,1,1,1,1,0,0,0,0,0,0,0
 };
 // values
-// 数字图像处理的表A.4 JPEG默认的DC编码（亮度），除去基码的长度后，一般K类需要额外K个bit存储
-// 最高是11个bit，因为书上说到量化后的DCT值限制为11bit
-// 为什么11bit能够表示差值呢（最大到2047和-2047），这是因为值域[-2047, -1024],[1024, 2047]总共2048个数值，
-// 刚好可以用11bit(类别k=11)存储，在存储时正值直接保存k位LSB，负值保存K位LSB-1的值（注意负数在计算机里都是补码存的），所以正值最高位是1
-// 负值最高位是0，就可以区分了
-// 例如-9在-15,-8之间，类别K=4，需要4位存，-9对应(0111)-1得到0110，而+9对应1001，其实就是反码的形式。
+// 这个表格应该是索引表
 static const uint8_t tjei_default_ht_luma_dc[12] =
 {
 		0,1,2,3,4,5,6,7,8,9,10,11
@@ -343,6 +338,8 @@ static const uint8_t tjei_default_ht_luma_ac_len[16] =
 {
 		0,2,1,3,3,2,4,3,5,5,4,4,0,0,1,0x7d
 };
+// 索引表，例如0x00，是第四个，根据上面一行，第四个长度应该是4（长度1的0个，长度2的2个，长度3的1个，长度4的3个）
+// 查看JPEG_HuffmanCodeTables.pdf可以看到0/0 (EOB)  4  1010，其实对应EOB()
 static const uint8_t tjei_default_ht_luma_ac[] =
 {
 		0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12, 0x21, 0x31, 0x41, 0x06, 0x13, 0x51, 0x61, 0x07,
@@ -511,7 +508,7 @@ static void tjei_write_DQT(TJEState* state, const uint8_t* matrix, uint8_t id)
 	uint16_t len = tjei_be_word(0x0043); // 2(len) + 1(id) + 64(matrix) = 67 = 0x43
 	tjei_write(state, &len, sizeof(uint16_t), 1);
 	assert(id < 4);
-	uint8_t precision_and_id = id;  // 0x0000 8 bits | 0x00id
+	uint8_t precision_and_id = id;  // 0x0000 8 bits | 0x00id	// 高4bit为0表示8bit，低4bit是QT表的编码
 	tjei_write(state, &precision_and_id, sizeof(uint8_t), 1);
 	// Write matrix
 	tjei_write(state, matrix, 64 * sizeof(uint8_t), 1);
@@ -631,7 +628,7 @@ TJEI_FORCE_INLINE void tjei_write_bits(TJEState* state,
 	//
 	// This call pushes to the bitbuffer and saves the location. Data is pushed
 	// from most significant to less significant.
-	// When we can write a full byte, we write a byte and shift.
+	// When we can write a full byte, we write a byte and shift.	// 每次满一个字节后就写入文件
 
 	// Push the stack.
 	uint32_t nloc = *location + num_bits;
@@ -839,9 +836,9 @@ static void tjei_encode_and_write_MCU(TJEState* state,
 	}
 #endif
 
-	uint16_t vli[2];
+	uint16_t vli[2];//  out[1] : number of bits, out[0] : bits
 
-	// Encode DC coefficient.
+	// Encode DC coefficient.	// DCPM后，用行程编码表示，（LEN，BIT），然后将LEN用huffman编码，BIT直接写入
 	int diff = du[0] - *pred;
 	*pred = du[0];
 	if (diff != 0) {
@@ -948,7 +945,7 @@ static void tjei_huff_expand(TJEState* state)
 		tjei_huff_get_codes(huffcode[i], huffsize[i], spec_tables_len[i]);
 	}
 	
-	// 拷贝到state中
+	// 根据索引拷贝到state中，根据数组len可以生成范式霍夫曼码表，根据tjei_default_ht_luma_dc一一对应每个码字对应的符号
 	for (int i = 0; i < 4; ++i) {
 		int64_t count = spec_tables_len[i];
 		tjei_huff_get_extended(state->ehuffsize[i],
@@ -1000,7 +997,7 @@ static int tjei_encode_main(TJEState* state,
 	}
 #endif
 
-	{ // Write header
+	{ // Write header	// 图片的识别信息
 		TJEJPEGHeader header;
 		// JFIF header.
 		header.SOI = tjei_be_word(0xffd8);  // Sequential DCT
@@ -1017,7 +1014,7 @@ static int tjei_encode_main(TJEState* state,
 		header.y_thumb = 0;
 		tjei_write(state, &header, sizeof(TJEJPEGHeader), 1);
 	}
-	{  // Write comment
+	{  // Write comment	// 量化表
 		TJEJPEGComment com;
 		uint16_t com_len = 2 + sizeof(tjeik_com_str) - 1;	// 长度包括了"长度"本身2个字节
 		// Comment
@@ -1031,7 +1028,7 @@ static int tjei_encode_main(TJEState* state,
 	tjei_write_DQT(state, state->qt_luma, 0x00);
 	tjei_write_DQT(state, state->qt_chroma, 0x01);
 
-	{  // Write the frame marker.
+	{  // Write the frame marker.	// 图像信息段
 		TJEFrameHeader header;
 		header.SOF = tjei_be_word(0xffc0);
 		header.len = tjei_be_word(8 + 3 * 3);
@@ -1063,7 +1060,7 @@ static int tjei_encode_main(TJEState* state,
 	tjei_write_DHT(state, state->ht_bits[TJEI_CHROMA_DC], state->ht_vals[TJEI_CHROMA_DC], TJEI_DC, 1);
 	tjei_write_DHT(state, state->ht_bits[TJEI_CHROMA_AC], state->ht_vals[TJEI_CHROMA_AC], TJEI_AC, 1);
 
-	// Write start of scan
+	// Write start of scan	// 图像数据段
 	{
 		TJEScanHeader header;
 		header.SOS = tjei_be_word(0xffda);
@@ -1130,8 +1127,8 @@ static int tjei_encode_main(TJEState* state,
 					uint8_t b = src_data[src_index + 2];
 
 					float luma = 0.299f   * r + 0.587f    * g + 0.114f    * b - 128;
-					float cb = -0.1687f * r - 0.3313f   * g + 0.5f      * b;
-					float cr = 0.5f     * r - 0.4187f   * g - 0.0813f   * b;
+					float cb   = -0.1687f * r - 0.3313f   * g + 0.5f      * b;
+					float cr   = 0.5f     * r - 0.4187f   * g - 0.0813f   * b;
 
 					du_y[block_index] = luma;
 					du_b[block_index] = cb;
