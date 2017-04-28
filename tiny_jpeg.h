@@ -396,6 +396,10 @@ static const uint8_t tjei_zig_zag[64] =
 };
 
 // Memory order as big endian. 0xhilo -> 0xlohi which looks as 0xhilo in memory.
+// JPEG要求是大端的
+// 简单点理解存储0xffd8为什么要变成0xd8ff。是因为如果变量是0xffd8，写到文件中就成了0xd8ff，所以要换一下
+// 注意大小端是CPU与内存的，fwrite的方式是统一的，从内存低地址写到高地址，而小端的内存是反的（0x78563412）
+// 所以大端可以直接写，不用转换
 static uint16_t tjei_be_word(const uint16_t le_word)
 {
 	uint16_t lo = (le_word & 0x00ff);
@@ -475,7 +479,7 @@ typedef struct
 } TJEScanHeader;
 #pragma pack(pop)
 
-
+// 手动实现带缓冲区的写文件
 static void tjei_write(TJEState* state, const void* data, size_t num_bytes, size_t num_elements)
 {
 	size_t to_write = num_bytes * num_elements;
@@ -551,9 +555,11 @@ static void tjei_write_DHT(TJEState* state,
 static uint8_t* tjei_huff_get_code_lengths(uint8_t huffsize[/*256*/], uint8_t const * bits)
 {
 	int k = 0;
-	for (int i = 0; i < 16; ++i) {
+	for (int i = 0; i < 16; ++i) {	// 数组bits最大16个元素
 		for (int j = 0; j < bits[i]; ++j) {
-			huffsize[k++] = (uint8_t)(i + 1);
+			huffsize[k++] = (uint8_t)(i + 1);	// 下标从0开始，而长度从1开始，这里求出每个码应该有的bit长度
+			// 0,1,5,1,1,1,1,1,1,0,0,0,0,0,0,0 可以得到2,3,3,3,3,3,4,5,6,7,8,9
+			
 		}
 		huffsize[k] = 0;
 	}
@@ -577,7 +583,7 @@ static uint16_t* tjei_huff_get_codes(uint16_t codes[], uint8_t* huffsize, int64_
 		do {
 			code = (uint16_t)(code << 1);
 			++sz;
-		} while (huffsize[k] != sz);
+		} while (huffsize[k] != sz);	// 如果中间有空白的码字则继续移位
 	}
 }
 
@@ -909,6 +915,7 @@ struct TJEProcessedQT
 #endif
 
 // Set up huffman tables in state.
+// 初始化范式哈夫曼编码表，仅用几个关键字就可以生成
 static void tjei_huff_expand(TJEState* state)
 {
 	assert(state);
@@ -924,7 +931,7 @@ static void tjei_huff_expand(TJEState* state)
 	state->ht_vals[TJEI_CHROMA_AC] = tjei_default_ht_chroma_ac;
 
 	// How many codes in total for each of LUMA_(DC|AC) and CHROMA_(DC|AC)
-	int32_t spec_tables_len[4] = { 0 };
+	int32_t spec_tables_len[4] = { 0 };	// 每个码表中码字的个数
 
 	for (int i = 0; i < 4; ++i) {
 		for (int k = 0; k < 16; ++k) {
@@ -937,10 +944,11 @@ static void tjei_huff_expand(TJEState* state)
 	uint16_t huffcode[4][256];
 	for (int i = 0; i < 4; ++i) {
 		assert(256 >= spec_tables_len[i]);
-		tjei_huff_get_code_lengths(huffsize[i], state->ht_bits[i]);
+		tjei_huff_get_code_lengths(huffsize[i], state->ht_bits[i]);	// 根据码字的个数，填充码字的bit长度，保存到huffsize中
 		tjei_huff_get_codes(huffcode[i], huffsize[i], spec_tables_len[i]);
 	}
-	// 这里应该只是完成了拷贝工作
+	
+	// 拷贝到state中
 	for (int i = 0; i < 4; ++i) {
 		int64_t count = spec_tables_len[i];
 		tjei_huff_get_extended(state->ehuffsize[i],
@@ -1011,7 +1019,7 @@ static int tjei_encode_main(TJEState* state,
 	}
 	{  // Write comment
 		TJEJPEGComment com;
-		uint16_t com_len = 2 + sizeof(tjeik_com_str) - 1;
+		uint16_t com_len = 2 + sizeof(tjeik_com_str) - 1;	// 长度包括了"长度"本身2个字节
 		// Comment
 		com.com = tjei_be_word(0xfffe);
 		com.com_len = tjei_be_word(com_len);
@@ -1236,7 +1244,7 @@ int tje_encode_with_func(tje_write_func* func,
 	// 根据压缩质量构造量化表
 	uint8_t qt_factor = 1;
 	switch (quality) {
-	case 3:
+	case 3:	// 最高质量下，量化步长统一为1
 		for (int i = 0; i < 64; ++i) {
 			state.qt_luma[i] = 1;
 			state.qt_chroma[i] = 1;
@@ -1248,7 +1256,7 @@ int tje_encode_with_func(tje_write_func* func,
 	case 1:
 		for (int i = 0; i < 64; ++i) {
 			state.qt_luma[i] = tjei_default_qt_luma_from_spec[i] / qt_factor;
-			if (state.qt_luma[i] == 0) {
+			if (state.qt_luma[i] == 0) {	// case 2情况下除以10，可以会出现0的情况，此时就对应量化1
 				state.qt_luma[i] = 1;
 			}
 			state.qt_chroma[i] = tjei_default_qt_chroma_from_paper[i] / qt_factor;
@@ -1262,6 +1270,7 @@ int tje_encode_with_func(tje_write_func* func,
 		break;
 	}
 
+	// 初始化输出上下文
 	TJEWriteContext wc = { 0 };
 
 	wc.context = context;
@@ -1269,9 +1278,10 @@ int tje_encode_with_func(tje_write_func* func,
 
 	state.write_context = wc;
 
-
+	// 生成默认的范式霍夫曼编码表
 	tjei_huff_expand(&state);
 
+	// 开始主要的编码过程，包括变换，量化，编码等
 	int result = tjei_encode_main(&state, src_data, width, height, num_components);
 
 	return result;
