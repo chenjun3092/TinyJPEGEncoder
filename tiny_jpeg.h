@@ -556,32 +556,29 @@ static uint8_t* tjei_huff_get_code_lengths(uint8_t huffsize[/*256*/], uint8_t co
 		for (int j = 0; j < bits[i]; ++j) {
 			huffsize[k++] = (uint8_t)(i + 1);	// 下标从0开始，而长度从1开始，这里求出每个码应该有的bit长度
 			// 0,1,5,1,1,1,1,1,1,0,0,0,0,0,0,0 可以得到2,3,3,3,3,3,4,5,6,7,8,9
-			
 		}
-		huffsize[k] = 0;
 	}
+	huffsize[k] = 0;	// 结尾标记成0就可以了
 	return huffsize;
 }
 
 // Fills out the prefixes for each code.
+// 由huffisze[] 2,3,3,3,3,3,4,5,6,7,8,9得到范式霍夫曼编码表
 static uint16_t* tjei_huff_get_codes(uint16_t codes[], uint8_t* huffsize, int64_t count)
 {
 	uint16_t code = 0;
 	int k = 0;
 	uint8_t sz = huffsize[0];
-	for (;;) {
-		do {
+
+	while (huffsize[k]) {
+		while (huffsize[k] == sz) {
 			assert(k < count);
 			codes[k++] = code++;
-		} while (huffsize[k] == sz);
-		if (huffsize[k] == 0) {
-			return codes;
 		}
-		do {
-			code = (uint16_t)(code << 1);
-			++sz;
-		} while (huffsize[k] != sz);	// 如果中间有空白的码字则继续移位
+		code = (uint16_t)(code << 1);
+		++sz;
 	}
+	return codes;
 }
 
 static void tjei_huff_get_extended(uint8_t* out_ehuffsize,
@@ -609,6 +606,7 @@ TJEI_FORCE_INLINE void tjei_calculate_variable_length_int(int value, uint16_t ou
 	if (value < 0) {
 		abs_val = -abs_val;
 		--value;	// 例如-9最后要得到LSB-1的结果，即反码（无符号位），而补码与反码差1
+		// 这是根据范式霍夫曼编码决定的，-31~-16:16:31，正数的第一位是1（这时没有符号位了），负数的是0（反码）
 	}
 	out[1] = 1;
 	while (abs_val >>= 1) {
